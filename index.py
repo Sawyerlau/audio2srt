@@ -10,7 +10,7 @@ import os
 API_KEY = "6804f065-c9b1-4bb3-b250-6a05e489b3b4"
 RESOURCE_ID = "volc.bigasr.auc"  # 录音1.0标准版
 AUDIO_URL_LIST = [
-    "https://tts-file2.com/s3/file/2026-04-22-103656_121183.mp3"
+    "https://d.tmpfile.link/public/2026-04-28/8780050b-e9e8-42b0-a8af-2c2cf0e6e63e/%E9%9F%B3%E9%A2%91.wav"
 ]
 
 # SRT优化配置
@@ -94,7 +94,7 @@ def split_text_by_comma(text):
     return [p for p in parts if p]
 
 def optimize_srt(input_path, output_path):
-    """优化SRT文件（拆分长句、均分时间）"""
+    """优化SRT文件（拆分长句、按字数比例分配时间）"""
     try:
         with open(input_path, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -117,28 +117,49 @@ def optimize_srt(input_path, output_path):
         if ' --> ' not in time_line:
             continue
         
+        # 1. 解析原始时间范围
         start_str, end_str = time_line.split(' --> ')
         start_ms = time_to_ms(start_str)
         end_ms = time_to_ms(end_str)
-        total_ms = end_ms - start_ms
+        total_ms = end_ms - start_ms  # 总时长（毫秒）
 
+        # 2. 拆分文本，并预处理计算字数
         parts = split_text_by_comma(text)
         if not parts:
             continue
         
-        count = len(parts)
-        per_ms = total_ms // count
+        # 3. 计算总字数（所有拆分片段的字数之和）
+        total_chars = sum(len(part.strip()) for part in parts)
+        if total_chars == 0:  # 防除零
+            continue
+        
+        # 4. 按字数比例分配时间
         current_start = start_ms
-
-        for p in parts:
-            current_end = current_start + per_ms
-            if current_end > end_ms:
+        for i, p in enumerate(parts):
+            p_chars = len(p.strip())
+            # 计算当前片段的时间占比
+            ratio = p_chars / total_chars
+            # 分配时长（总时长 × 占比）
+            part_ms = int(total_ms * ratio)
+            
+            # 最后一个片段直接补足到结束时间（避免浮点误差）
+            if i == len(parts) - 1:
                 current_end = end_ms
+            else:
+                current_end = current_start + part_ms
+                # 防止时间溢出（极端情况）
+                if current_end > end_ms:
+                    current_end = end_ms
+            
+            # 生成新的时间行
             new_time = f"{ms_to_time(current_start)} --> {ms_to_time(current_end)}"
             new_blocks.append([str(new_index), new_time, p])
+            
+            # 更新下一个片段的开始时间
             current_start = current_end
             new_index += 1
 
+    # 写入优化后的SRT文件
     try:
         with open(output_path, 'w', encoding='utf-8') as f:
             for b in new_blocks:
