@@ -1,31 +1,26 @@
+
 import requests
 import uuid
 import time
 import json
 import re
 import os
+import base64
 
-# ===================== 基础配置区 =====================
-# 语音转写API配置
 API_KEY = "6804f065-c9b1-4bb3-b250-6a05e489b3b4"
-RESOURCE_ID = "volc.bigasr.auc"  # 录音1.0标准版
+RESOURCE_ID = "volc.bigasr.auc"
 AUDIO_URL_LIST = [
-    "https://d.tmpfile.link/public/2026-04-28/8780050b-e9e8-42b0-a8af-2c2cf0e6e63e/%E9%9F%B3%E9%A2%91.wav"
+    "https://tts-file2.com/s5/file/2026-04-29-210554_136626.mp3"
 ]
 
-# SRT优化配置
-MAX_LENGTH = 25       # 每行字幕最大字数
-SPLIT_SYMBOL = "，"   # 按中文逗号拆分
-DELETE_PERIOD = True  # 删除句号
-# ====================================================
+MAX_LENGTH = 25
+SPLIT_SYMBOL = "，"
+DELETE_PERIOD = True
 
-# 语音转写接口地址
 SUBMIT_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit"
 QUERY_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query"
 
-# ===================== 时间格式转换工具 =====================
 def ms_to_srt(ms):
-    """毫秒转SRT时间格式（用于转写）"""
     ms = int(ms)
     s = ms // 1000
     ms = ms % 1000
@@ -36,7 +31,6 @@ def ms_to_srt(ms):
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 def time_to_ms(time_str):
-    """SRT时间字符串转毫秒（用于拆分）"""
     time_str = time_str.replace(',', '.')
     parts = time_str.split(':')
     h = int(parts[0])
@@ -45,7 +39,6 @@ def time_to_ms(time_str):
     return int((h * 3600 + m * 60 + s) * 1000)
 
 def ms_to_time(ms):
-    """毫秒转回SRT时间格式（用于拆分）"""
     ms = int(ms)
     hours = ms // 3600000
     minutes = (ms % 3600000) // 60000
@@ -53,9 +46,7 @@ def ms_to_time(ms):
     millis = ms % 1000
     return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
 
-# ===================== SRT生成与优化 =====================
 def generate_srt(utterances):
-    """生成原始SRT内容"""
     srt = []
     idx = 1
     for utt in utterances:
@@ -69,8 +60,26 @@ def generate_srt(utterances):
         idx += 1
     return "\n".join(srt)
 
+
+def file_to_base64(file_path):
+    with open(file_path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
+
+
+def upload_file(file_path):
+    with open(file_path, "rb") as f:
+        print("👉 正在上传（备用URL方案）...")
+        resp = requests.post("https://0x0.st", files={"file": f}, timeout=30)
+
+    if resp.status_code == 200:
+        url = resp.text.strip()
+        print("✅ 上传成功：", url)
+        return url
+    else:
+        print("❌ 上传失败：", resp.text)
+        return None
+
 def split_text_by_comma(text):
-    """按逗号拆分句子，控制长度"""
     text = text.strip()
     if DELETE_PERIOD:
         text = text.replace("。", "")
@@ -93,16 +102,11 @@ def split_text_by_comma(text):
         parts.append(current)
     return [p for p in parts if p]
 
-def optimize_srt(input_path, output_path):
-    """优化SRT文件（拆分长句、按字数比例分配时间）"""
-    try:
-        with open(input_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-    except Exception as e:
-        print(f"⚠️  读取SRT文件失败：{input_path} | 错误：{e}")
-        return False
-
-    blocks = re.split(r'\n\s*\n', content.strip())
+def optimize_srt_content(srt_content):
+    # 修复可能的 HTML 转义字符
+    srt_content = srt_content.replace('&gt;', '>').replace('&lt;', '<').replace('&amp;', '&')
+    
+    blocks = re.split(r'\n\s*\n', srt_content.strip())
     new_blocks = []
     new_index = 1
 
@@ -111,73 +115,94 @@ def optimize_srt(input_path, output_path):
         if len(lines) < 3:
             continue
         
-        time_line = lines[1]
-        text = ' '.join(lines[2:])
-
-        if ' --> ' not in time_line:
+        # 查找包含 --> 的时间行
+        time_line = None
+        text_start = 0
+        for i, line in enumerate(lines):
+            if ' --> ' in line or '-->' in line:
+                time_line = line
+                text_start = i + 1
+                break
+        
+        if time_line is None:
             continue
         
-        # 1. 解析原始时间范围
-        start_str, end_str = time_line.split(' --> ')
+        # 提取时间
+        if ' --> ' in time_line:
+            start_str, end_str = time_line.split(' --> ')
+        else:
+            start_str, end_str = time_line.split('-->')
+        start_str = start_str.strip()
+        end_str = end_str.strip()
+        
         start_ms = time_to_ms(start_str)
         end_ms = time_to_ms(end_str)
-        total_ms = end_ms - start_ms  # 总时长（毫秒）
+        total_ms = end_ms - start_ms
 
-        # 2. 拆分文本，并预处理计算字数
+        text = ' '.join(lines[text_start:])
+
         parts = split_text_by_comma(text)
         if not parts:
             continue
         
-        # 3. 计算总字数（所有拆分片段的字数之和）
         total_chars = sum(len(part.strip()) for part in parts)
-        if total_chars == 0:  # 防除零
+        if total_chars == 0:
             continue
         
-        # 4. 按字数比例分配时间
         current_start = start_ms
         for i, p in enumerate(parts):
             p_chars = len(p.strip())
-            # 计算当前片段的时间占比
             ratio = p_chars / total_chars
-            # 分配时长（总时长 × 占比）
             part_ms = int(total_ms * ratio)
             
-            # 最后一个片段直接补足到结束时间（避免浮点误差）
             if i == len(parts) - 1:
                 current_end = end_ms
             else:
                 current_end = current_start + part_ms
-                # 防止时间溢出（极端情况）
                 if current_end > end_ms:
                     current_end = end_ms
             
-            # 生成新的时间行
             new_time = f"{ms_to_time(current_start)} --> {ms_to_time(current_end)}"
             new_blocks.append([str(new_index), new_time, p])
             
-            # 更新下一个片段的开始时间
             current_start = current_end
             new_index += 1
 
-    # 写入优化后的SRT文件
+    return "\n\n".join(["\n".join(b) for b in new_blocks]) + "\n"
+
+def optimize_srt(input_path, output_path):
     try:
-        with open(output_path, 'w', encoding='utf-8') as f:
-            for b in new_blocks:
-                f.write('\n'.join(b) + '\n\n')
-        return True
+        with open(input_path, 'r', encoding='utf-8') as f:
+            content = f.read()
     except Exception as e:
-        print(f"⚠️  写入优化后SRT失败：{output_path} | 错误：{e}")
+        print(f"读取SRT文件失败：{input_path} | 错误：{e}")
         return False
 
-# ===================== 音频处理主逻辑 =====================
-def process_single_audio(audio_url, file_index):
-    """处理单个音频：转写生成SRT → 自动优化SRT"""
-    task_id = str(uuid.uuid4())
-    print(f"\n===== 开始处理第 {file_index} 个音频 =====")
-    print("任务ID：", task_id)
-    print("音频地址：", audio_url)
+    optimized_content = optimize_srt_content(content)
 
-    # 1. 配置请求头
+    try:
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(optimized_content)
+        return True
+    except Exception as e:
+        print(f"写入优化后SRT失败：{output_path} | 错误：{e}")
+        return False
+
+def transcribe_audio(audio_input, log_cb=None, is_local_file=False):
+    def log(msg):
+        if log_cb:
+            log_cb(msg)
+        else:
+            print(msg)
+    
+    task_id = str(uuid.uuid4())
+    log("任务ID：" + task_id)
+    
+    if is_local_file:
+        log("本地文件：" + audio_input)
+    else:
+        log("音频地址：" + audio_input)
+
     headers = {
         "X-Api-Key": API_KEY,
         "X-Api-Resource-Id": RESOURCE_ID,
@@ -186,30 +211,67 @@ def process_single_audio(audio_url, file_index):
         "Content-Type": "application/json"
     }
 
-    # 2. 提交转写任务
-    body = {
-        "user": {"uid": "user123"},
-        "audio": {"url": audio_url, "format": "mp3"},
-        "request": {
-            "model_name": "bigmodel",
-            "enable_itn": True,
-            "enable_punc": True,
-            "show_utterances": True
+    if is_local_file:
+        audio_base64 = file_to_base64(audio_input)
+        body = {
+            "user": {"uid": "user123"},
+            "audio": {"data": audio_base64, "format": "mp3"},
+            "request": {
+                "model_name": "bigmodel",
+                "enable_itn": True,
+                "enable_punc": True,
+                "show_utterances": True
+            }
         }
-    }
+    else:
+        body = {
+            "user": {"uid": "user123"},
+            "audio": {"url": audio_input, "format": "mp3"},
+            "request": {
+                "model_name": "bigmodel",
+                "enable_itn": True,
+                "enable_punc": True,
+                "show_utterances": True
+            }
+        }
 
-    print("提交转写任务...")
+    log("提交转写任务...")
     resp = requests.post(SUBMIT_URL, headers=headers, json=body)
     code = resp.headers.get("X-Api-Status-Code")
     msg = resp.headers.get("X-Api-Message")
-    print(f"提交结果：{code} | {msg}")
+    log(f"提交结果：{code} | {msg}")
+
+    if code != "20000000" and is_local_file:
+        log("base64上传失败，尝试URL方案...")
+        url = upload_file(audio_input)
+        if not url:
+            log("URL上传也失败！")
+            return None
+        
+        body_url = {
+            "user": {"uid": "user123"},
+            "audio": {"url": url, "format": "mp3"},
+            "request": {
+                "model_name": "bigmodel",
+                "enable_itn": True,
+                "enable_punc": True,
+                "show_utterances": True
+            }
+        }
+        resp = requests.post(SUBMIT_URL, headers=headers, json=body_url)
+        code = resp.headers.get("X-Api-Status-Code")
+        msg = resp.headers.get("X-Api-Message")
+        log(f"URL方案提交结果：{code} | {msg}")
+        
+        if code != "20000000":
+            log("URL方案也失败！")
+            return None
 
     if code != "20000000":
-        print(f"❌ 第 {file_index} 个音频提交失败！")
-        return
+        log("提交失败！")
+        return None
 
-    # 3. 轮询转写结果
-    print("任务提交成功，轮询识别结果...")
+    log("任务提交成功，轮询识别结果...")
     result = None
     while True:
         time.sleep(2)
@@ -217,43 +279,74 @@ def process_single_audio(audio_url, file_index):
         q_code = q_resp.headers.get("X-Api-Status-Code")
         q_msg = q_resp.headers.get("X-Api-Message")
 
-        print(f"查询状态：{q_code} | {q_msg}")
+        log(f"查询状态：{q_code} | {q_msg}")
 
-        if q_code in ("20000001", "20000002"):  # 处理中/等待中
+        if q_code in ("20000001", "20000002"):
             continue
         if q_code != "20000000":
-            print(f"❌ 第 {file_index} 个音频识别失败")
-            return
+            log("识别失败")
+            return None
 
         result = q_resp.json()
         break
 
-    # 4. 生成原始SRT文件
-    utters = result.get("result", {}).get("utterances", [])
-    if not utters:
-        print(f"❌ 第 {file_index} 个音频未获取到分句信息")
+    return result
+
+def process_single_audio(audio_input, file_index, log_cb=None, is_local_file=False, filename_prefix=None):
+    def log(msg):
+        if log_cb:
+            log_cb(msg)
+        else:
+            print(msg)
+    
+    log(f"\n===== 开始处理第 {file_index} 个音频 =====")
+    
+    result = transcribe_audio(audio_input, log_cb, is_local_file)
+    if not result:
+        log(f"第 {file_index} 个音频处理失败")
         return
 
-    raw_srt_filename = f"{file_index}.srt"
+    utters = result.get("result", {}).get("utterances", [])
+    if not utters:
+        log(f"第 {file_index} 个音频未获取到分句信息")
+        return
+
+    if filename_prefix:
+        base_name = filename_prefix
+    else:
+        base_name = str(file_index)
+    
+    raw_srt_filename = f"{base_name}.srt"
     srt_content = generate_srt(utters)
     with open(raw_srt_filename, "w", encoding="utf-8") as f:
         f.write(srt_content)
-    print(f"✅ 已生成原始SRT：{raw_srt_filename}")
-    print("识别文本：\n" + result["result"]["text"])
+    log(f"已生成原始SRT：{raw_srt_filename}")
+    log("识别文本：\n" + result["result"]["text"])
 
-    # 5. 自动优化SRT文件
-    optimized_srt_filename = f"{file_index}已优化.srt"
+    optimized_srt_filename = f"{base_name}已优化.srt"
     if optimize_srt(raw_srt_filename, optimized_srt_filename):
-        print(f"✅ 已生成优化后SRT：{optimized_srt_filename}")
+        log(f"已生成优化后SRT：{optimized_srt_filename}")
     else:
-        print(f"❌ 第 {file_index} 个音频SRT优化失败")
+        log(f"第 {file_index} 个音频SRT优化失败")
+
+def process_audio_list(url_list, log_cb=None):
+    def log(msg):
+        if log_cb:
+            log_cb(msg)
+        else:
+            print(msg)
+    
+    total = len(url_list)
+    for index, audio_url in enumerate(url_list, start=1):
+        process_single_audio(audio_url, index, log_cb)
+    
+    log("\n所有音频处理完毕！")
 
 def main():
-    """主函数：批量处理所有音频"""
     for index, audio_url in enumerate(AUDIO_URL_LIST, start=1):
         process_single_audio(audio_url, index)
     
-    print("\n🎉 所有音频处理完毕！")
+    print("\n所有音频处理完毕！")
 
 if __name__ == "__main__":
     main()

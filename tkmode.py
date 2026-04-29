@@ -1,297 +1,303 @@
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-import requests
-import uuid
-import time
-import json
-import re
-import os
+import customtkinter as ctk
+from tkinter import filedialog, messagebox, Listbox, Scrollbar
 import threading
+import os
 
-# ===================== 配置区 =====================
-API_KEY = "6804f065-c9b1-4bb3-b250-6a05e489b3b4"
-RESOURCE_ID = "volc.bigasr.auc"
-SUBMIT_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit"
-QUERY_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query"
+from index import process_single_audio, optimize_srt
 
-MAX_LENGTH = 25
-SPLIT_SYMBOL = "，"
-DELETE_PERIOD = True
-# ==================================================
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
 
-# ===================== 工具函数 =====================
-def ms_to_srt(ms):
-    ms = int(ms)
-    s = ms // 1000
-    ms = ms % 1000
-    m = s // 60
-    s = s % 60
-    h = m // 60
-    m = m % 60
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+    HAS_DND = True
+except ImportError:
+    HAS_DND = False
 
-def time_to_ms(time_str):
-    time_str = time_str.replace(',', '.')
-    parts = time_str.split(':')
-    h = int(parts[0])
-    m = int(parts[1])
-    s = float(parts[2])
-    return int((h * 3600 + m * 60 + s) * 1000)
 
-def ms_to_time(ms):
-    ms = int(ms)
-    hours = ms // 3600000
-    minutes = (ms % 3600000) // 60000
-    seconds = (ms % 60000) // 1000
-    millis = ms % 1000
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
+class App(TkinterDnD.Tk if HAS_DND else ctk.CTk):
+    def __init__(self):
+        super().__init__()
 
-def split_text_by_comma(text):
-    text = text.strip()
-    if DELETE_PERIOD:
-        text = text.replace("。", "")
-    raw_parts = text.split(SPLIT_SYMBOL)
-    parts = []
-    current = ""
-    for part in raw_parts:
-        part = part.strip()
-        if not part:
-            continue
-        if len(current) + len(part) + 1 <= MAX_LENGTH:
-            current += (SPLIT_SYMBOL if current else "") + part
-        else:
-            if current:
-                parts.append(current)
-            current = part
-    if current:
-        parts.append(current)
-    return [p for p in parts if p]
+        self.title("音频工具箱")
+        self.geometry("900x650")
 
-# ===================== SRT 优化（按字数比例） =====================
-def optimize_srt_content(srt_content):
-    content = srt_content
-    blocks = re.split(r'\n\s*\n', content.strip())
-    new_blocks = []
-    new_index = 1
+        self.local_files = []
 
-    for block in blocks:
-        lines = [line.strip() for line in block.split('\n') if line.strip()]
-        if len(lines) < 3:
-            continue
-        time_line = lines[1]
-        text = ' '.join(lines[2:])
-        if ' --> ' not in time_line:
-            continue
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
 
-        start_str, end_str = time_line.split(' --> ')
-        start_ms = time_to_ms(start_str)
-        end_ms = time_to_ms(end_str)
-        total_ms = end_ms - start_ms
+        self.create_sidebar()
+        self.create_main_area()
 
-        parts = split_text_by_comma(text)
-        if not parts:
-            continue
+    # =========================
+    # UI 基础结构
+    # =========================
+    def create_sidebar(self):
+        sidebar = ctk.CTkFrame(self, width=160)
+        sidebar.grid(row=0, column=0, sticky="ns")
 
-        total_chars = sum(len(p.strip()) for p in parts)
-        if total_chars == 0:
-            continue
+        ctk.CTkLabel(
+            sidebar,
+            text="工具箱",
+            font=ctk.CTkFont(size=18, weight="bold")
+        ).pack(pady=20)
 
-        current_start = start_ms
-        for i, p in enumerate(parts):
-            char_len = len(p.strip())
-            ratio = char_len / total_chars
-            part_ms = int(total_ms * ratio)
+        ctk.CTkButton(sidebar, text="音频转SRT", command=self.show_tab1).pack(pady=10, padx=10)
+        ctk.CTkButton(sidebar, text="SRT优化", command=self.show_tab2).pack(pady=10, padx=10)
 
-            if i == len(parts) - 1:
-                current_end = end_ms
-            else:
-                current_end = current_start + part_ms
+    def create_main_area(self):
+        self.main = ctk.CTkFrame(self)
+        self.main.grid(row=0, column=1, sticky="nsew")
 
-            new_time = f"{ms_to_time(current_start)} --> {ms_to_time(current_end)}"
-            new_blocks.append([str(new_index), new_time, p])
-            current_start = current_end
-            new_index += 1
+        self.main.grid_columnconfigure(0, weight=1)
+        self.main.grid_rowconfigure(3, weight=1)
 
-    return "\n\n".join(["\n".join(b) for b in new_blocks]) + "\n"
+        self.show_tab1()
 
-# ===================== 音频转写（支持批量） =====================
-def process_audio_list(url_list, log_cb):
-    def task():
-        total = len(url_list)
-        for idx, url in enumerate(url_list, 1):
-            log_cb(f"\n==================================")
-            log_cb(f"正在处理第 {idx}/{total} 个音频")
-            log_cb(f"链接：{url}")
+    def clear_main(self):
+        for w in self.main.winfo_children():
+            w.destroy()
 
-            task_id = str(uuid.uuid4())
-            headers = {
-                "X-Api-Key": API_KEY,
-                "X-Api-Resource-Id": RESOURCE_ID,
-                "X-Api-Request-Id": task_id,
-                "X-Api-Sequence": "-1",
-                "Content-Type": "application/json"
-            }
+    # =========================
+    # TAB 1
+    # =========================
+    def show_tab1(self):
+        self.clear_main()
 
-            body = {
-                "user": {"uid": "user123"},
-                "audio": {"url": url, "format": "mp3"},
-                "request": {
-                    "model_name": "bigmodel",
-                    "enable_itn": True,
-                    "enable_punc": True,
-                    "show_utterances": True
-                }
-            }
+        ctk.CTkLabel(
+            self.main,
+            text="批量音频转SRT",
+            font=ctk.CTkFont(size=20, weight="bold")
+        ).grid(row=0, column=0, sticky="w", pady=10)
 
-            log_cb("提交转写任务...")
+        self.tab_mode = ctk.CTkSegmentedButton(
+            self.main,
+            values=["外链模式", "本地文件"],
+            command=self.switch_mode
+        )
+        self.tab_mode.set("本地文件")
+        self.tab_mode.grid(row=1, column=0, sticky="w", pady=10)
+
+        # =========================
+        # URL 区
+        # =========================
+        self.frame_url = ctk.CTkFrame(self.main)
+        self.frame_url.grid(row=2, column=0, sticky="nsew")
+        self.frame_url.grid_remove()
+
+        ctk.CTkLabel(self.frame_url, text="外链（每行一个）", text_color="gray").pack(anchor="w")
+
+        self.url_text = ctk.CTkTextbox(self.frame_url, height=120)
+        self.url_text.pack(fill="both", expand=True)
+
+        # =========================
+        # 本地文件区
+        # =========================
+        self.frame_local = ctk.CTkFrame(self.main)
+        self.frame_local.grid(row=2, column=0, sticky="nsew")
+
+        btn_row = ctk.CTkFrame(self.frame_local, fg_color="transparent")
+        btn_row.pack(fill="x", pady=5)
+
+        ctk.CTkButton(btn_row, text="选择文件", command=self.select_files, width=120).pack(side="left")
+        ctk.CTkButton(btn_row, text="清空", command=self.clear_files, width=120).pack(side="left", padx=10)
+
+        ctk.CTkLabel(btn_row, text="拖拽文件到这里", text_color="gray").pack(side="left", padx=20)
+
+        # 👉 先创建 log1（关键修复点）
+        self.log1 = ctk.CTkTextbox(self.main, height=120)
+        self.log1.grid(row=3, column=0, sticky="nsew", pady=10)
+
+        self._create_file_list(self.frame_local)
+
+        ctk.CTkButton(self.main, text="开始处理", height=40, command=self.start_batch).grid(
+            row=4, column=0, sticky="ew"
+        )
+
+        self.switch_mode("本地文件")
+
+    # =========================
+    # FILE LIST
+    # =========================
+    def _create_file_list(self, parent):
+        wrap = ctk.CTkFrame(parent)
+        wrap.pack(fill="both", expand=True)
+
+        self.file_listbox = Listbox(
+            wrap,
+            bg="#2b2b2b",
+            fg="white",
+            selectbackground="#3a6ea5",
+            font=("Microsoft YaHei", 10)
+        )
+        self.file_listbox.pack(side="left", fill="both", expand=True)
+
+        scroll = Scrollbar(wrap, command=self.file_listbox.yview)
+        scroll.pack(side="right", fill="y")
+        self.file_listbox.config(yscrollcommand=scroll.set)
+
+        if HAS_DND:
+            self.enable_dnd()
+
+    # =========================
+    # DRAG & DROP
+    # =========================
+    def enable_dnd(self):
+        def on_drop(event):
             try:
-                resp = requests.post(SUBMIT_URL, headers=headers, json=body, timeout=20)
-            except:
-                log_cb("❌ 网络请求失败")
-                continue
-
-            code = resp.headers.get("X-Api-Status-Code")
-            msg = resp.headers.get("X-Api-Message")
-
-            if code != "20000000":
-                log_cb(f"❌ 提交失败：{code} {msg}")
-                continue
-
-            log_cb("任务提交成功，等待识别结果...")
-            result = None
-            while True:
-                time.sleep(2)
-                try:
-                    q_resp = requests.post(QUERY_URL, headers=headers, json={}, timeout=10)
-                except:
-                    log_cb("⚠️ 查询超时，重试中...")
-                    continue
-
-                q_code = q_resp.headers.get("X-Api-Status-Code")
-                if q_code in ("20000001", "20000002"):
-                    continue
-                if q_code != "20000000":
-                    log_cb("❌ 识别失败")
-                    break
-                result = q_resp.json()
-                break
-
-            if not result:
-                continue
-
-            utters = result.get("result", {}).get("utterances", [])
-            if not utters:
-                log_cb("❌ 未获取到分句信息")
-                continue
-
-            # 生成原始SRT
-            srt_content = ""
-            num = 1
-            for utt in utters:
-                srt_content += f"{num}\n{ms_to_srt(utt['start_time'])} --> {ms_to_srt(utt['end_time'])}\n{utt['text']}\n\n"
-                num += 1
-
-            # 优化
-            log_cb("正在优化 SRT（按字数比例分配时间）...")
-            optimized = optimize_srt_content(srt_content)
-
-            # 保存
-            raw_name = f"{idx}.srt"
-            opt_name = f"{idx}_已优化.srt"
-            with open(raw_name, "w", encoding="utf-8") as f:
-                f.write(srt_content)
-            with open(opt_name, "w", encoding="utf-8") as f:
-                f.write(optimized)
-
-            log_cb(f"✅ 第 {idx} 个处理完成！")
-            log_cb(f"📄 原始文件：{raw_name}")
-            log_cb(f"✅ 优化文件：{opt_name}")
-
-        log_cb("\n🎉 所有音频批量处理完成！")
-
-    threading.Thread(target=task, daemon=True).start()
-
-# ===================== 界面 =====================
-class App:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("音频批量转SRT + SRT智能优化工具（按字数比例）")
-        self.root.geometry("720x520")
-
-        tab_control = ttk.Notebook(root)
-        self.tab1 = ttk.Frame(tab_control)
-        self.tab2 = ttk.Frame(tab_control)
-        tab_control.add(self.tab1, text="🎵 批量音频外链转SRT")
-        tab_control.add(self.tab2, text="📝 本地SRT优化")
-        tab_control.pack(expand=1, fill="both", padx=5, pady=5)
-
-        # === 标签1：批量转写 ===
-        ttk.Label(self.tab1, text="请粘贴音频外链（一行一个，支持批量）：").pack(pady=3)
-        self.url_text = tk.Text(self.tab1, height=6, width=85)
-        self.url_text.pack(pady=3, padx=5)
-        self.url_text.insert("end", "https://\n")
-
-        self.log1 = tk.Text(self.tab1, height=14, width=85)
-        self.log1.pack(pady=3, padx=5)
-
-        ttk.Button(self.tab1, text="开始批量转写 + 优化", command=self.start_batch).pack(pady=5)
-
-        # === 标签2：SRT优化 ===
-        ttk.Label(self.tab2, text="选择要优化的SRT文件：").pack(pady=8)
-        self.srt_path_var = tk.StringVar()
-        ttk.Entry(self.tab2, textvariable=self.srt_path_var, width=80).pack(pady=3)
-        ttk.Button(self.tab2, text="浏览文件", command=self.browse_srt).pack(pady=2)
-
-        self.log2 = tk.Text(self.tab2, height=16, width=85)
-        self.log2.pack(pady=5, padx=5)
-
-        ttk.Button(self.tab2, text="开始优化（按字数比例）", command=self.optimize_srt_file).pack(pady=5)
-
-    def log(self, msg, tab=1):
-        if tab == 1:
-            self.log1.insert(tk.END, msg + "\n")
-            self.log1.see(tk.END)
-        else:
-            self.log2.insert(tk.END, msg + "\n")
-            self.log2.see(tk.END)
-
-    def start_batch(self):
-        text = self.url_text.get("1.0", tk.END).strip()
-        lines = [l.strip() for l in text.splitlines() if l.strip() and l.strip().startswith("http")]
-        if not lines:
-            messagebox.showerror("错误", "请输入至少一个有效音频链接！")
-            return
-        self.log1.delete("1.0", tk.END)
-        process_audio_list(lines, lambda m: self.log(m, 1))
-
-    def browse_srt(self):
-        path = filedialog.askopenfilename(filetypes=[("SRT文件", "*.srt")])
-        if path:
-            self.srt_path_var.set(path)
-
-    def optimize_srt_file(self):
-        path = self.srt_path_var.get().strip()
-        if not path or not os.path.exists(path):
-            messagebox.showerror("错误", "请选择有效的SRT文件")
-            return
-        self.log2.delete("1.0", tk.END)
-        def task():
-            try:
-                self.log("读取文件中...", 2)
-                with open(path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                self.log("正在优化（按字数比例分配时间）...", 2)
-                new_content = optimize_srt_content(content)
-                name = os.path.splitext(path)[0]
-                out_path = name + "_已优化.srt"
-                with open(out_path, "w", encoding="utf-8") as f:
-                    f.write(new_content)
-                self.log(f"✅ 完成！文件已保存：\n{out_path}", 2)
+                files = self.tk.splitlist(event.data)
+                self.add_files(files)
             except Exception as e:
-                self.log(f"错误：{e}", 2)
+                self.log(f"拖拽失败: {e}")
+
+        # 拖拽整个区域更自然
+        self.frame_local.drop_target_register(DND_FILES)
+        self.frame_local.dnd_bind("<<Drop>>", on_drop)
+
+        self.log("拖拽功能已启用")
+
+    # =========================
+    # FILE LOGIC
+    # =========================
+    def add_files(self, paths):
+        added = 0
+
+        for p in paths:
+            p = p.strip().strip("{}").strip('"')
+
+            if not os.path.isfile(p):
+                continue
+
+            if p in self.local_files:
+                continue
+
+            self.local_files.append(p)
+            self.file_listbox.insert("end", f" {os.path.basename(p)}")
+            added += 1
+
+        if added:
+            self.log(f"已添加 {added} 个文件")
+
+    def select_files(self):
+        files = filedialog.askopenfilenames(
+            title="选择音频文件",
+            filetypes=[("音频文件", "*.mp3 *.wav *.m4a *.flac *.aac *.ogg"), ("所有文件", "*.*")]
+        )
+        self.add_files(files)
+
+    def clear_files(self):
+        self.local_files.clear()
+        self.file_listbox.delete(0, "end")
+
+    # =========================
+    # MODE SWITCH
+    # =========================
+    def switch_mode(self, mode):
+        if mode == "外链模式":
+            self.frame_url.grid()
+            self.frame_local.grid_remove()
+        else:
+            self.frame_url.grid_remove()
+            self.frame_local.grid()
+
+    # =========================
+    # LOG（安全版，防炸）
+    # =========================
+    def log(self, msg, box=None):
+        try:
+            target = self.log1 if box is None else box
+            target.insert("end", msg + "\n")
+            target.see("end")
+        except Exception:
+            print(msg)
+
+    # =========================
+    # RUN
+    # =========================
+    def start_batch(self):
+        mode = self.tab_mode.get()
+
+        if mode == "外链模式":
+            text = self.url_text.get("0.0", "end")
+            urls = [i.strip() for i in text.splitlines() if i.startswith("http")]
+
+            if not urls:
+                messagebox.showwarning("提示", "请输入URL")
+                return
+
+            def task():
+                for i, url in enumerate(urls):
+                    process_single_audio(url, i + 1, lambda m: self.log(m))
+                self.log("全部完成")
+
+            threading.Thread(target=task, daemon=True).start()
+
+        else:
+            if not self.local_files:
+                messagebox.showwarning("提示", "请选择文件")
+                return
+
+            def task():
+                for i, path in enumerate(self.local_files):
+                    filename = os.path.splitext(os.path.basename(path))[0]
+                    process_single_audio(
+                        path,
+                        i + 1,
+                        lambda m: self.log(m),
+                        is_local_file=True,
+                        filename_prefix=filename
+                    )
+                self.log("全部完成")
+
+            threading.Thread(target=task, daemon=True).start()
+
+    # =========================
+    # TAB 2
+    # =========================
+    def show_tab2(self):
+        self.clear_main()
+
+        ctk.CTkLabel(
+            self.main,
+            text="SRT优化",
+            font=ctk.CTkFont(size=20, weight="bold")
+        ).grid(row=0, column=0, sticky="w")
+
+        self.srt_path = ctk.StringVar()
+
+        row = ctk.CTkFrame(self.main)
+        row.grid(row=1, column=0, sticky="ew", pady=10)
+        row.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkEntry(row, textvariable=self.srt_path).grid(row=0, column=0, sticky="ew")
+        ctk.CTkButton(row, text="选择", command=self.browse).grid(row=0, column=1, padx=10)
+
+        self.log2 = ctk.CTkTextbox(self.main)
+        self.log2.grid(row=2, column=0, sticky="nsew")
+
+        ctk.CTkButton(self.main, text="开始优化", command=self.optimize).grid(row=3, column=0, sticky="ew")
+
+        self.main.grid_rowconfigure(2, weight=1)
+
+    def browse(self):
+        path = filedialog.askopenfilename(filetypes=[("SRT", "*.srt")])
+        if path:
+            self.srt_path.set(path)
+
+    def optimize(self):
+        path = self.srt_path.get()
+        if not os.path.exists(path):
+            messagebox.showwarning("错误", "文件不存在")
+            return
+
+        def task():
+            out = os.path.splitext(path)[0] + "_opt.srt"
+            optimize_srt(path, out)
+            self.log(f"完成: {out}", self.log2)
+
         threading.Thread(target=task, daemon=True).start()
 
+
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = App(root)
-    root.mainloop()
+    App().mainloop()
