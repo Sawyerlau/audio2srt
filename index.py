@@ -7,8 +7,36 @@ import re
 import os
 import base64
 
-API_KEY = "6804f065-c9b1-4bb3-b250-6a05e489b3b4"
-RESOURCE_ID = "volc.bigasr.auc"
+# 配置文件路径
+CONFIG_FILE = "audio2srt_config.json"
+DEFAULT_CONFIG = {
+    "API_KEY": "",
+    "RESOURCE_ID": "volc.bigasr.auc"
+}
+
+
+def load_config():
+    """加载配置文件"""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return {**DEFAULT_CONFIG, **data}
+        except Exception:
+            return DEFAULT_CONFIG.copy()
+    return DEFAULT_CONFIG.copy()
+
+
+def save_config(config):
+    """保存配置文件"""
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+
+
+# 初始化配置
+config = load_config()
+API_KEY = config["API_KEY"]
+RESOURCE_ID = config["RESOURCE_ID"]
 AUDIO_URL_LIST = [
     "https://tts-file2.com/s5/file/2026-04-29-210554_136626.mp3"
 ]
@@ -19,6 +47,7 @@ DELETE_PERIOD = True
 
 SUBMIT_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit"
 QUERY_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query"
+
 
 def ms_to_srt(ms):
     ms = int(ms)
@@ -65,19 +94,6 @@ def file_to_base64(file_path):
     with open(file_path, "rb") as f:
         return base64.b64encode(f.read()).decode("utf-8")
 
-
-def upload_file(file_path):
-    with open(file_path, "rb") as f:
-        print("👉 正在上传（备用URL方案）...")
-        resp = requests.post("https://0x0.st", files={"file": f}, timeout=30)
-
-    if resp.status_code == 200:
-        url = resp.text.strip()
-        print("✅ 上传成功：", url)
-        return url
-    else:
-        print("❌ 上传失败：", resp.text)
-        return None
 
 def split_text_by_comma(text):
     text = text.strip()
@@ -240,32 +256,16 @@ def transcribe_audio(audio_input, log_cb=None, is_local_file=False):
     code = resp.headers.get("X-Api-Status-Code")
     msg = resp.headers.get("X-Api-Message")
     log(f"提交结果：{code} | {msg}")
-
-    if code != "20000000" and is_local_file:
-        log("base64上传失败，尝试URL方案...")
-        url = upload_file(audio_input)
-        if not url:
-            log("URL上传也失败！")
-            return None
-        
-        body_url = {
-            "user": {"uid": "user123"},
-            "audio": {"url": url, "format": "mp3"},
-            "request": {
-                "model_name": "bigmodel",
-                "enable_itn": True,
-                "enable_punc": True,
-                "show_utterances": True
-            }
-        }
-        resp = requests.post(SUBMIT_URL, headers=headers, json=body_url)
-        code = resp.headers.get("X-Api-Status-Code")
-        msg = resp.headers.get("X-Api-Message")
-        log(f"URL方案提交结果：{code} | {msg}")
-        
-        if code != "20000000":
-            log("URL方案也失败！")
-            return None
+    
+    if code == "45000010":
+        log("")
+        log("="*50)
+        log("❌ API Key 无效！")
+        log("请访问以下链接获取或更新 API Key：")
+        log("https://console.volcengine.com/speech/new/setting/apikeys?projectName=default")
+        log("然后在程序的\"设置\"页面更新 API Key")
+        log("="*50)
+        log("")
 
     if code != "20000000":
         log("提交失败！")
@@ -316,14 +316,19 @@ def process_single_audio(audio_input, file_index, log_cb=None, is_local_file=Fal
     else:
         base_name = str(file_index)
     
-    raw_srt_filename = f"{base_name}.srt"
+    # 创建 SRT 文件夹
+    srt_dir = os.path.join(os.getcwd(), "SRT")
+    if not os.path.exists(srt_dir):
+        os.makedirs(srt_dir)
+    
+    raw_srt_filename = os.path.join(srt_dir, f"{base_name}.srt")
     srt_content = generate_srt(utters)
     with open(raw_srt_filename, "w", encoding="utf-8") as f:
         f.write(srt_content)
     log(f"已生成原始SRT：{raw_srt_filename}")
     log("识别文本：\n" + result["result"]["text"])
 
-    optimized_srt_filename = f"{base_name}已优化.srt"
+    optimized_srt_filename = os.path.join(srt_dir, f"{base_name}已优化.srt")
     if optimize_srt(raw_srt_filename, optimized_srt_filename):
         log(f"已生成优化后SRT：{optimized_srt_filename}")
     else:
