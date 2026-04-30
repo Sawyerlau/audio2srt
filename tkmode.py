@@ -4,6 +4,12 @@ import threading
 import os
 import json
 import webbrowser
+import sys
+
+def resource_path(relative_path):
+    if getattr(sys, 'frozen', False):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.abspath("."), relative_path)
 
 # 引入 index 模块，用于同步配置
 import index
@@ -78,7 +84,7 @@ class App(TkinterDnD.Tk if HAS_DND else ctk.CTk):
         self.state('zoomed')  # 默认全屏
         self.resizable(True, True)
         self.minsize(900, 600)  # 设置最小窗口尺寸
-        self.icon = tk.PhotoImage(file="./image/ico.png")  # 保存图标引用
+        self.icon = tk.PhotoImage(file=resource_path("./image/ico.png"))  # 保存图标引用
         self.iconphoto(True, self.icon)   # True 表示同时影响任务栏图标（尽量）
         self.local_files = []
         self.active_tab = None
@@ -110,7 +116,7 @@ class App(TkinterDnD.Tk if HAS_DND else ctk.CTk):
 
         try:
             from PIL import Image as PILImage
-            img = PILImage.open("./image/ico.png")
+            img = PILImage.open(resource_path("./image/ico.png"))
             max_height = 25
             if img.height > max_height:
                 ratio = max_height / img.height
