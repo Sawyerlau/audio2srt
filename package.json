@@ -1,0 +1,57 @@
+{
+  "name": "audio2srt",
+  "version": "1.0.0",
+  "description": "音频转SRT字幕工具箱 - Electron + React 版本",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "compile:electron": "npx tsc -p tsconfig.electron.json",
+    "electron:dev": "npm run compile:electron && concurrently \"npm run dev\" \"wait-on http://localhost:5173 && electron .\"",
+    "electron:build": "tsc && vite build && electron-builder"
+  },
+  "dependencies": {
+    "antd": "^5.21.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-dropzone": "^14.2.3",
+    "zustand": "^4.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.4",
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^9.0.1",
+    "electron": "^32.1.2",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.6.2",
+    "vite": "^5.4.8",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.syie.audio2srt",
+    "productName": "Audio2SRT",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "python_backend/**/*",
+      "image/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "image/ico.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
+  "author": "Syie",
+  "license": "MIT"
+}

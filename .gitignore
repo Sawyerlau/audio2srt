@@ -31,3 +31,4 @@ Thumbs.db
 # Project generated files
 *.srt
 *已优化.srt
+node_modules
